@@ -12,7 +12,7 @@ case_name = 'michdemo_6_8'
 num_processes = 5
 
 # model setting file
-modelsettings_file = "model.settings.toml"
+modelsettings_file = "/content/drive/MyDrive/capstone_data/gpep_ltam_v0_1/model.settings.toml"
 
 ########################################################################################################################
 # settings for gridded estimation using regression or machine learning methods
