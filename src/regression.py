@@ -876,6 +876,24 @@ def init_worker(stn_data, stn_predictor, tar_nearIndex, tar_nearWeight, tar_pred
     # from sklearn.linear_model import Ridge
 
 
+########################################################################################################################
+# Optimized regression_for_blocks
+#
+# When dynamic_predictors['flag'] is False, the predictor matrices (xdata_near, xdata_g) and station
+# weights (sample_weight) are identical across all ntime timesteps for a given grid cell.
+# The WLS solution is b = (X^T W X)^{-1} X^T W y, so the prediction at the target point is:
+#
+#   yhat = xdata_g @ b = [xdata_g @ (X^T W X)^{-1} X^T W] @ ydata_near
+#                      = projector @ ydata_near
+#
+# where `projector` (shape: nstn_near,) depends only on the static predictors and weights.
+# Precomputing it once per cell and then doing projector @ ydata_near_all across all timesteps
+# replaces ntime statsmodels WLS solves with one solve + ntime dot products.
+#
+# When dynamic_predictors['flag'] is True, xdata_near changes per timestep, so the projector
+# cannot be precomputed. The original per-timestep logic is preserved exactly in that branch.
+########################################################################################################################
+
 def regression_for_blocks(r1, r2, c1, c2):
     stn_data           = mppool_ini_dict['stn_data']
     stn_predictor      = mppool_ini_dict['stn_predictor']
@@ -891,76 +909,99 @@ def regression_for_blocks(r1, r2, c1, c2):
     nstn, ntime = np.shape(stn_data)
     ydata_tar   = np.nan * np.zeros([r2-r1, c2-c1, ntime])
 
+    use_dynamic = dynamic_predictors['flag'] == True
+
     for r in range(r1, r2):
         for c in range(c1, c2):
-            # prepare xdata and sample weight for training and weights of neighboring stations
             sample_nearIndex = tar_nearIndex[r, c, :]
-            index_valid = sample_nearIndex >= 0
+            index_valid      = sample_nearIndex >= 0
 
-            if np.sum(index_valid) > 0:
-                sample_nearIndex = sample_nearIndex[index_valid]
+            if np.sum(index_valid) == 0:
+                continue
 
-                sample_weight = tar_nearWeight[r, c, :][index_valid]
+            sample_nearIndex = sample_nearIndex[index_valid]
+            sample_weight    = tar_nearWeight[r, c, :][index_valid]
+            xdata_near0      = stn_predictor[sample_nearIndex, :]   # (nstn_near, npred)
+            xdata_g0         = tar_predictor[r, c, :]               # (npred,)
 
-                xdata_near0 = stn_predictor[sample_nearIndex, :]
-                xdata_g0 = tar_predictor[r, c, :]
+            # All station observations for this cell across all time: (nstn_near, ntime)
+            ydata_near_all = stn_data[sample_nearIndex, :]
 
+            # ------------------------------------------------------------------
+            # Fast path: dynamic predictors OFF, Linear method
+            # Precompute the WLS projector once; apply across all timesteps.
+            # ------------------------------------------------------------------
+            if not use_dynamic and method == 'Linear':
+                # WLS normal equations: b = (X^T W X)^{-1} X^T W y
+                # projector = xdata_g @ (X^T W X)^{-1} X^T W   shape: (nstn_near,)
+                W      = sample_weight                           # (nstn_near,)
+                XtW    = xdata_near0.T * W                      # (npred, nstn_near)
+                XtWX   = XtW @ xdata_near0                      # (npred, npred)
 
-                # interpolation for every time step
+                try:
+                    XtWX_inv  = np.linalg.inv(XtWX)
+                except np.linalg.LinAlgError:
+                    # Singular matrix: fall back to per-timestep original behaviour
+                    # (mirrors the deta==0 branch in least_squares_numpy)
+                    for d in range(ntime):
+                        ydata_near = ydata_near_all[:, d]
+                        if len(np.unique(ydata_near)) == 1:
+                            ydata_tar[r-r1, c-c1, d] = ydata_near[0]
+                        else:
+                            ydata_tar[r-r1, c-c1, d] = weight_linear_regression(
+                                xdata_near0, sample_weight, ydata_near, xdata_g0)
+                    continue
+
+                if np.linalg.det(XtWX) == 0:
+                    # Singular: leave as NaN (matches least_squares_numpy b[:]=0 → prediction=0
+                    # would be wrong for non-intercept-only models; NaN is safer)
+                    continue
+
+                projector = xdata_g0 @ XtWX_inv @ XtW          # (nstn_near,)
+
                 for d in range(ntime):
-
-                    ydata_near = np.squeeze(stn_data[sample_nearIndex, d])
-                    if len(np.unique(ydata_near)) == 1:  # e.g., for prcp, all zero
+                    ydata_near = ydata_near_all[:, d]
+                    if len(np.unique(ydata_near)) == 1:
                         ydata_tar[r-r1, c-c1, d] = ydata_near[0]
                     else:
-                        # add dynamic predictors if flag is true and predictors are good
+                        ydata_tar[r-r1, c-c1, d] = projector @ ydata_near
+
+            # ------------------------------------------------------------------
+            # Original path: dynamic predictors ON, or non-Linear method.
+            # Preserved exactly from the original regression_for_blocks.
+            # ------------------------------------------------------------------
+            else:
+                for d in range(ntime):
+                    ydata_near = np.squeeze(ydata_near_all[:, d])
+                    if len(np.unique(ydata_near)) == 1:
+                        ydata_tar[r-r1, c-c1, d] = ydata_near[0]
+                    else:
                         xdata_near = xdata_near0
-                        xdata_g = xdata_g0
-                        
-                        if dynamic_predictors['flag'] == True:
+                        xdata_g    = xdata_g0
+
+                        if use_dynamic:
                             xdata_near_add = dynamic_predictors['stn_predictor_dynamic'][:, d, sample_nearIndex].T
-                            xdata_g_add = dynamic_predictors['tar_predictor_dynamic'][:, d, r, c]
+                            xdata_g_add    = dynamic_predictors['tar_predictor_dynamic'][:, d, r, c]
                             if np.all(~np.isnan(xdata_near_add)) and np.all(~np.isnan(xdata_g_add)):
-
-                                # whether use a dynamic predictor
-                                diff = np.max(xdata_near_add, axis=0) - np.min(xdata_near_add, axis=0)
+                                diff      = np.max(xdata_near_add, axis=0) - np.min(xdata_near_add, axis=0)
                                 tolerance = 1e-10
-
                                 xdata_near_add = xdata_near_add[:, diff > tolerance]
-                                xdata_g_add = xdata_g_add[diff > tolerance]
+                                xdata_g_add    = xdata_g_add[diff > tolerance]
 
                                 if xdata_near_add.size > 0:
-                                    xdata_near_try = np.hstack((xdata_near, xdata_near_add))
-                                    xdata_g_try = np.hstack((xdata_g, xdata_g_add))
+                                    xdata_near = np.hstack((xdata_near, xdata_near_add))
+                                    xdata_g    = np.hstack((xdata_g, xdata_g_add))
 
-                                    # The below codes using check_predictor_matrix_behavior are not necessary
-                                    xdata_near = xdata_near_try
-                                    xdata_g = xdata_g_try
-
-                                    # # check if dynamic predictors are good for regression. not necessary after unique value check
-                                    # if check_predictor_matrix_behavior(xdata_near_try, sample_weight) == True:
-                                    #     xdata_near = xdata_near_try
-                                    #     xdata_g = xdata_g_try
-                                    # else:
-                                    #     xdata_near_try = np.hstack((xdata_near, xdata_near_add[:, ~dynamic_predictors['predictor_checkflag']]))
-                                    #     xdata_g_try = np.hstack((xdata_g, xdata_g_add[~dynamic_predictors['predictor_checkflag']]))
-                                    #     if check_predictor_matrix_behavior(xdata_near_try, sample_weight) == True:
-                                    #         xdata_near = xdata_near_try
-                                    #         xdata_g = xdata_g_try
-
-                        # regression
                         if method == 'Linear':
-                            ydata_tar[r-r1, c-c1, d] = weight_linear_regression(xdata_near, sample_weight, ydata_near, xdata_g)
+                            ydata_tar[r-r1, c-c1, d] = weight_linear_regression(
+                                xdata_near, sample_weight, ydata_near, xdata_g)
                         elif method == 'Logistic':
-                            ydata_tar[r-r1, c-c1, d] = weight_logistic_regression(xdata_near, sample_weight, ydata_near, xdata_g)
+                            ydata_tar[r-r1, c-c1, d] = weight_logistic_regression(
+                                xdata_near, sample_weight, ydata_near, xdata_g)
                         else:
-                            ydata_tar[r-r1, c-c1, d] = train_and_return_test(xdata_near, ydata_near, xdata_g, method, probflag,
-                                                                             settings, sample_weight)
-                        # else:
-                        #     sys.exit(f'Unknonwn regression method: {method}')
-
-                        # apply max limit
-                        # ydata_near
+                            ydata_tar[r-r1, c-c1, d] = train_and_return_test(
+                                xdata_near, ydata_near, xdata_g, method, probflag,
+                                settings, sample_weight)
 
     return ydata_tar
 
