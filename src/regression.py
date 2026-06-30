@@ -4,6 +4,7 @@ import pandas as pd
 import xarray as xr
 from multiprocessing import Pool
 from data_processing import data_transformation, calculate_monthly_cdfs
+from regression_gpu import loop_regression_2Dor3D_auto
 from sklearn.linear_model import LinearRegression
 from sklearn.linear_model import LogisticRegression
 from evaluate import evaluate_allpoint
@@ -1431,7 +1432,7 @@ def main_regression(config, target):
             else:
                 maxlimit = {'flag': False}
             
-            estimates = loop_regression_2Dor3D_multiprocessing(stn_value, stn_predictor, nearIndex, nearWeight, tar_predictor,
+            estimates = loop_regression_2Dor3D_auto(stn_value, stn_predictor, nearIndex, nearWeight, tar_predictor,
                                                                gridcore_continuous[4:], probflag, sklearn_config[gridcore_continuous_short],
                                                                predictor_dynamic, num_processes, maxlimit=maxlimit)
         else:
@@ -1504,7 +1505,7 @@ def main_regression(config, target):
 
             probflag = True
             if gridcore_classification.startswith('LWR:'):
-                estimates = loop_regression_2Dor3D_multiprocessing(stn_value, stn_predictor, nearIndex, nearWeight, tar_predictor,
+                estimates = loop_regression_2Dor3D_auto(stn_value, stn_predictor, nearIndex, nearWeight, tar_predictor,
                                                                    gridcore_classification[4:], probflag,
                                                                    sklearn_config[gridcore_continuous_short], predictor_dynamic,
                                                                    num_processes, importmodules)
