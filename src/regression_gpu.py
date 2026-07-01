@@ -96,6 +96,8 @@ def regression_grid_gpu_linear_static(stn_data, stn_predictor, tar_nearIndex, ta
 
     n_batches = int(np.ceil(len(valid_cells) / cell_batch_size))
 
+    predictor_global_var = cp.asarray(stn_predictor, dtype=np_dtype).var(axis=0)   # (npred,)
+
     for b in range(n_batches):
         batch_cells = valid_cells[b * cell_batch_size: (b + 1) * cell_batch_size]
         B = len(batch_cells)
@@ -125,28 +127,28 @@ def regression_grid_gpu_linear_static(stn_data, stn_predictor, tar_nearIndex, ta
 
         n_valid = valid_gpu.sum(axis=1)                      # (B,)
 
-        # symmetric PSD matrix -> eigvalsh is exact and batched
-        eigvals = cp.linalg.eigvalsh(XtWX)                    # (B, npred), ascending
-        lam_min = eigvals[:, 0]
-        lam_max = eigvals[:, -1]
+        # Flag any predictor column (excluding col 0, constant) that has ~zero variance
+        # across a cell's *valid* neighbors. 
+        # Variance must be computed over valid entries only
+        mean = cp.einsum('bnp->bp', X) / n_valid[:, None]                      # (B, npred)
+        diff = (X - mean[:, None, :]) * valid_gpu[:, :, None]                  # zero out invalid rows
+        var  = cp.einsum('bnp,bnp->bp', diff, diff) / n_valid[:, None]         # (B, npred)
 
-        # OLD: determinant check before regularizing to null out singular cells afterward
-        # det = cp.linalg.det(XtWX)
-        # singular = cp.abs(det) < 1e-300
-        rel_tol = 1e-8
-        singular = (n_valid < npred) | (lam_min <= rel_tol * cp.clip(lam_max, 1e-300, None))
+        # Scale the near-zero threshold relative to each predictor's *global* variance
+        # across all stations
+        rel_var_eps = 1e-8
+        near_zero_var = var[:, 1:] < (rel_var_eps * predictor_global_var[None, 1:])   # skip intercept col
+        collinear = cp.any(near_zero_var, axis=1)                                     # (B,)
 
-        # ridge term scaled to each matrix's own trace, vanishingly small for well-conditioned matrices
+        singular = (n_valid < npred) | collinear
+
         trace = cp.einsum('bii->b', XtWX)
         eye = cp.eye(npred, dtype=np_dtype)[None, :, :]
         XtWX_reg = XtWX + ridge_eps * (trace[:, None, None] + 1.0) * eye
 
-        # Z = (X^T W X)^{-1} X^T W, solved (not inverted) for stability: (B, npred, nearmax)
         Z = cp.linalg.solve(XtWX_reg, XtW)
-
-        # projector: (B, nearmax) -- one weight per neighbor, applied directly to station observations
         projector = cp.einsum('bp,bpm->bm', xg_gpu, Z)
-        projector = projector * valid_gpu            # zero contribution from padded neighbor slots
+        projector = projector * valid_gpu
         projector[singular, :] = cp.nan
 
         # --- apply the projector across all timesteps, in time chunks to bound GPU memory ---
