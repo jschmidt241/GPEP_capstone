@@ -133,7 +133,7 @@ def regression_grid_gpu_linear_static(stn_data, stn_predictor, tar_nearIndex, ta
         # OLD: determinant check before regularizing to null out singular cells afterward
         # det = cp.linalg.det(XtWX)
         # singular = cp.abs(det) < 1e-300
-        rel_tol = 1e-10
+        rel_tol = 1e-6
         singular = (n_valid < npred) | (lam_min <= rel_tol * cp.clip(lam_max, 1e-300, None))
 
         # ridge term scaled to each matrix's own trace, vanishingly small for well-conditioned matrices
