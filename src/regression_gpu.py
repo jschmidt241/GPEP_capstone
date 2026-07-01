@@ -123,9 +123,18 @@ def regression_grid_gpu_linear_static(stn_data, stn_predictor, tar_nearIndex, ta
         XtW  = cp.transpose(X, (0, 2, 1)) * weight_gpu[:, None, :]
         XtWX = cp.matmul(XtW, X)                      # (B, npred, npred)
 
-        # determinant check BEFORE regularizing, so we can null out truly singular cells afterward
-        det = cp.linalg.det(XtWX)
-        singular = cp.abs(det) < 1e-300              # effectively zero; matches CPU "deta == 0" branch
+        n_valid = valid_gpu.sum(axis=1)                      # (B,)
+
+        # symmetric PSD matrix -> eigvalsh is exact and batched
+        eigvals = cp.linalg.eigvalsh(XtWX)                    # (B, npred), ascending
+        lam_min = eigvals[:, 0]
+        lam_max = eigvals[:, -1]
+
+        # OLD: determinant check before regularizing to null out singular cells afterward
+        # det = cp.linalg.det(XtWX)
+        # singular = cp.abs(det) < 1e-300
+        rel_tol = 1e-10
+        singular = (n_valid < npred) | (lam_min <= rel_tol * cp.clip(lam_max, 1e-300, None))
 
         # ridge term scaled to each matrix's own trace, vanishingly small for well-conditioned matrices
         trace = cp.einsum('bii->b', XtWX)
