@@ -636,7 +636,7 @@ def build_model(method, settings, sample_weight_given):
     _CUML_NO_SAMPLE_WEIGHT = {'ensemble.RandomForestRegressor', 'ensemble.RandomForestClassifier'}
 
     use_cuml = (
-        is_gpu_available
+        is_gpu_available()
         and method in _CUML_MODEL_MAP
         and not (sample_weight_given and method in _CUML_NO_SAMPLE_WEIGHT)
     )
