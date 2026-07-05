@@ -624,12 +624,20 @@ def build_model(method, settings, sample_weight_given):
     a sample_weight is required but this cuML estimator can't take one, or cuML
     construction raises for any reason (e.g. an unsupported kwarg in `settings`).
     """
-    _CUML_MODEL_MAP = {
-        'linear_model.LinearRegression': _cuLinearRegression,
-        'linear_model.LogisticRegression': _cuLogisticRegression,
-        'ensemble.RandomForestRegressor': _cuRandomForestRegressor,
-        'ensemble.RandomForestClassifier': _cuRandomForestClassifier,
-    }
+    _CUML_MODEL_MAP = {}
+    try:
+        from cuml.linear_model import LinearRegression as _cuLinearRegression
+        from cuml.linear_model import LogisticRegression as _cuLogisticRegression
+        from cuml.ensemble import RandomForestRegressor as _cuRandomForestRegressor
+        from cuml.ensemble import RandomForestClassifier as _cuRandomForestClassifier
+        _CUML_MODEL_MAP = {
+            'linear_model.LinearRegression': _cuLinearRegression,
+            'linear_model.LogisticRegression': _cuLogisticRegression,
+            'ensemble.RandomForestRegressor': _cuRandomForestRegressor,
+            'ensemble.RandomForestClassifier': _cuRandomForestClassifier,
+        }
+    except Exception as e:
+        print(f'No usable GPU/cuML found ({e}); regression will run on sklearn/CPU.')
 
     # cuML estimators whose .fit() currently does NOT accept sample_weight (as of cuML 26.08).
     # If this changes in a future cuML release, remove the relevant entry here.
