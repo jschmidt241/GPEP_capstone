@@ -4,7 +4,6 @@ import pandas as pd
 import xarray as xr
 from multiprocessing import Pool
 from data_processing import data_transformation, calculate_monthly_cdfs
-from regression_gpu import loop_regression_2Dor3D_auto
 from sklearn.linear_model import LinearRegression
 from sklearn.linear_model import LogisticRegression
 from evaluate import evaluate_allpoint
@@ -892,8 +891,7 @@ def init_worker(stn_data, stn_predictor, tar_nearIndex, tar_nearWeight, tar_pred
 # replaces ntime statsmodels WLS solves with one solve + ntime dot products.
 #
 # When dynamic_predictors['flag'] is True, xdata_near changes per timestep, so the projector
-# cannot be precomputed. The original per-timestep logic is preserved exactly in that branch.
-########################################################################################################################
+# cannot be precomputed. GPEP's original logic is preserved in that case
 
 def regression_for_blocks(r1, r2, c1, c2):
     stn_data           = mppool_ini_dict['stn_data']
@@ -1432,7 +1430,7 @@ def main_regression(config, target):
             else:
                 maxlimit = {'flag': False}
             
-            estimates = loop_regression_2Dor3D_auto(stn_value, stn_predictor, nearIndex, nearWeight, tar_predictor,
+            estimates = loop_regression_2Dor3D_multiprocessing(stn_value, stn_predictor, nearIndex, nearWeight, tar_predictor,
                                                                gridcore_continuous[4:], probflag, sklearn_config[gridcore_continuous_short],
                                                                predictor_dynamic, num_processes, maxlimit=maxlimit)
         else:
@@ -1505,7 +1503,7 @@ def main_regression(config, target):
 
             probflag = True
             if gridcore_classification.startswith('LWR:'):
-                estimates = loop_regression_2Dor3D_auto(stn_value, stn_predictor, nearIndex, nearWeight, tar_predictor,
+                estimates = loop_regression_2Dor3D_multiprocessing(stn_value, stn_predictor, nearIndex, nearWeight, tar_predictor,
                                                                    gridcore_classification[4:], probflag,
                                                                    sklearn_config[gridcore_continuous_short], predictor_dynamic,
                                                                    num_processes, importmodules)
