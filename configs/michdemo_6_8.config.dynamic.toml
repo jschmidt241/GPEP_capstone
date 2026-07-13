@@ -1,0 +1,106 @@
+# configuration file used to run GPEP
+# check ./doc/How_to_create_config_files for detailed guidance
+
+########################################################################################################################
+# general settings
+########################################################################################################################
+
+# case name. will be used in ensemble outputs generations
+case_name = 'michdemo_6_8'
+
+# worker number (cpu cores)
+num_processes = 5
+
+# model setting file
+modelsettings_file = "/content/drive/MyDrive/capstone_data/gpep_ltam_v0_1/model.settings.toml"
+
+########################################################################################################################
+# settings for gridded estimation using regression or machine learning methods
+########################################################################################################################
+
+############################## input/output files
+# station input data: method 1 or 2
+
+# Method-1: please give the input station file list (with attributes) and input station path
+# input_stn_list = "NA"
+# input_stn_path = "NA"
+
+# Method-2: please give the file name contains all stations.
+#input_stn_all = "/content/drive/MyDrive/capstone_data/gpep_ltam_v0_1/mi_stations_input.nc"
+
+# domain gridded attributes (e.g., dem, lon, lat, slope)
+infile_grid_domain = "/content/drive/MyDrive/capstone_data/gpep_ltam_v0_1/michdemo_6_8_domain_grid.nc"
+
+# parent output path
+outpath_parent = "/content/drive/MyDrive/capstone_data/outputs"
+
+############################## target variables and periods
+# target period
+date_start = "2025-01-01"
+date_end = "2025-12-31"
+
+# input/output variables
+input_vars = ['prcp', 'tmin', 'tmax'] # variables in the raw station files
+target_vars = ['prcp', 'tmean', 'trange'] # target output variables
+
+# input variables may need some conversion to get target variables. if input_var and target_var have the same variable name, no need to add mapping relation
+mapping_InOut_var = ['tmean=(tmin+tmax)/2', 'trange=abs(tmax-tmin)']
+
+# some target variables (e.g., precipitation, snowfall, hail) need occurrence probability estimation (i.e., a probability between 0-1)
+target_vars_WithProbability = ['prcp']
+
+# the below three settings are optional. if not provided, there will be no min/max limit or transformation
+# minRange_vars = [0, -100, 1]
+# maxRange_vars = [2000, 60, 60]
+
+# (optional) if set onlytrans_ens to True, transformation is not implemented for the regression, and is only implemented for the ensemble estimation
+transform_vars = ['boxcox', '', '']
+onlytrans_ens = true
+
+############################## dynamic predictors for regression
+# only useful when dynamic_predictor_filelist is valid
+
+# file list containing dynamic predictor inputs (optional). Give it a nonsense string (e.g., "NA") can turn off dynamic predictors
+dynamic_predictor_filelist = "NA"
+
+# dynamic predictors for each target_vars. Empty list means no dynamic predictors
+dynamic_predictor_name = []
+
+# dynamic predictors may needs some processing. two keywords: "interp" an "transform"
+# Example "cube_root_prec_rate:interp=linear:transform=boxcox"
+dynamic_predictor_operation = []
+
+############################## static/dynamic predictors used in regression
+# static predictors in input_stn_list or input_stn_all
+predictor_name_static_stn = ['lat', 'lon', 'elev','slp_n','slp_e']
+
+# dynamic predictors in infile_grid_domain
+predictor_name_static_grid = ['latitude', 'longitude', 'elev','gradient_n_s', 'gradient_w_e']
+
+########################################################################################################################
+# settings for probabilistic estimation
+########################################################################################################################
+
+# run ensemble or not: true or false
+ensemble_flag = true
+
+# ensemble settings
+ensemble_start = 1
+ensemble_end = 5
+
+# link variables for random number generation dependence
+linkvar = [ ['prcp', 'trange'], ]
+
+# variable correlations. They are all optional
+# clen = [150, 800, 800] # corresponding to target_vars
+# lag1_auto_cc = [-9999, -9999, -9999] # corresponding to target_vars
+# cross_cc = [-9999] # corresponding to linkvar
+
+# direct: using raw time series to calculate autocorrelation; anomaly: using the anomaly of time series to calculate autocorrelation
+auto_corr_method = ['direct', 'anomaly', 'anomaly'] # corresponding to target_vars
+
+# only effective for auto_corr_method=anomaly. rolling mean window size, which is used for variable lag auto correlation calculation
+rolling_window = 31 # 31-monthly rolling mean to remove monthly cycle
+
+# nearby max constraint
+target_vars_max_constrain = ['prcp']
