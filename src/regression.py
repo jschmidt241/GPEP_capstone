@@ -14,6 +14,28 @@ from sklearn.model_selection import KFold
 import sklearn
 from sklearn import *
 
+GPU_AVAILABLE = False
+_CUML_MODEL_MAP = {}
+# cuML estimators whose .fit() currently does NOT accept sample_weight (as of cuML 26.08).
+# If this changes in a future cuML release, remove the relevant entry here.
+_CUML_NO_SAMPLE_WEIGHT = {'ensemble.RandomForestRegressor', 'ensemble.RandomForestClassifier'}
+try:
+    import cupy as cp
+    if cp.cuda.runtime.getDeviceCount() > 0:
+        from cuml.linear_model import LinearRegression as _cuLinearRegression
+        from cuml.linear_model import LogisticRegression as _cuLogisticRegression
+        from cuml.ensemble import RandomForestRegressor as _cuRandomForestRegressor
+        from cuml.ensemble import RandomForestClassifier as _cuRandomForestClassifier
+        _CUML_MODEL_MAP = {
+            'linear_model.LinearRegression': _cuLinearRegression,
+            'linear_model.LogisticRegression': _cuLogisticRegression,
+            'ensemble.RandomForestRegressor': _cuRandomForestRegressor,
+            'ensemble.RandomForestClassifier': _cuRandomForestClassifier,
+        }
+        GPU_AVAILABLE = True
+except Exception as e:
+    print(f'No usable GPU/cuML found ({e}); regression will run on sklearn/CPU.')
+
 ########################################################################################################################
 # ludcmp, lubksb, and linearsolver
 
@@ -595,6 +617,33 @@ def flatten_list(lst):
 ########################################################################################################################
 # machine learning regression
 
+def build_model(method, settings, sample_weight_given):
+    """
+    method: dotted sklearn path string exactly as used in regression.py's sklearn_config,
+            e.g. 'linear_model.LinearRegression', 'ensemble.RandomForestRegressor'.
+    Returns (model, backend) where backend is 'cuml' or 'sklearn'.
+
+    Falls back to sklearn if: GPU/cuML unavailable, method not in _CUML_MODEL_MAP,
+    a sample_weight is required but this cuML estimator can't take one, or cuML
+    construction raises for any reason (e.g. an unsupported kwarg in `settings`).
+    """
+    use_cuml = (
+        GPU_AVAILABLE
+        and method in _CUML_MODEL_MAP
+        and not (sample_weight_given and method in _CUML_NO_SAMPLE_WEIGHT)
+    )
+
+    if use_cuml:
+        try:
+            model = _CUML_MODEL_MAP[method](**settings)
+            return model, 'cuml'
+        except Exception as e:
+            print(f'cuML construction failed for {method} ({e}); falling back to sklearn.')
+
+    ldict = {'settings': settings, 'method': method}
+    exec(f"model = sklearn.{method}(**settings)", globals(), ldict)
+    return ldict['model'], 'sklearn'
+
 def train_and_return_test(Xtrain, ytrain, Xtest, method, probflag, settings = {}, weight=[]):
     indexvalid = ~np.isnan( np.sum(Xtrain, axis=1) + ytrain)
 
@@ -608,28 +657,61 @@ def train_and_return_test(Xtrain, ytrain, Xtest, method, probflag, settings = {}
     Xtrain = Xtrain[indexvalid, :]
     ytrain = ytrain[indexvalid]
 
-    ldict = {'settings': settings, 'method': method}
-    exec(f"model = sklearn.{method}(**settings)", globals(), ldict)
-    # exec(f"model = {method}(**settings)", globals(), ldict)
-    model = ldict['model']
+    sample_weight_given = len(weight) > 0
+    model, backend = build_model(method, settings, sample_weight_given)
 
-    if len(weight) == 0:
-        model.fit(Xtrain, ytrain)
+    # cuML wants float32 contiguous arrays; sklearn is fine with the original dtype as-is
+    if backend == 'cuml':
+        Xtrain_fit = np.ascontiguousarray(Xtrain, dtype=np.float32)
+        ytrain_fit = np.ascontiguousarray(ytrain, dtype=np.float32)
+        Xtest_fit = np.ascontiguousarray(Xtest, dtype=np.float32)
     else:
-        model.fit(Xtrain, ytrain, weight)
+        Xtrain_fit, ytrain_fit, Xtest_fit = Xtrain, ytrain, Xtest
 
-    if probflag == False:
-        ytest = model.predict(Xtest)
-    else:
-        try:
-            ytest = model.predict_proba(Xtest)[:, 1]
-        except:
+    try:
+        if not sample_weight_given:
+            model.fit(Xtrain_fit, ytrain_fit)
+        else:
+            model.fit(Xtrain_fit, ytrain_fit, weight)
+
+        if probflag == False:
+            ytest = model.predict(Xtest_fit)
+        else:
+            try:
+                ytest = model.predict_proba(Xtest_fit)[:, 1]
+            except:
+                ytest = model.predict(Xtest_fit)
+    except Exception as e:
+        if backend != 'cuml':
+            raise
+        # last-resort fallback: this specific fit/predict call failed on GPU (e.g. an
+        # edge-case input cuML chokes on); retry the same call on sklearn/CPU rather
+        # than losing the whole run.
+        print(f'cuML fit/predict failed for {method} ({e}); retrying this call on sklearn/CPU.')
+        ldict = {'settings': settings, 'method': method}
+        exec(f"model = sklearn.{method}(**settings)", globals(), ldict)
+        # exec(f"model = {method}(**settings)", globals(), ldict)
+        model = ldict['model']
+        if not sample_weight_given:
+            model.fit(Xtrain, ytrain)
+        else:
+            model.fit(Xtrain, ytrain, weight)
+        if probflag == False:
             ytest = model.predict(Xtest)
+        else:
+            try:
+                ytest = model.predict_proba(Xtest)[:, 1]
+            except:
+                ytest = model.predict(Xtest)
+
+    if hasattr(ytest, 'get'):
+        ytest = ytest.get()
+    ytest = np.asarray(ytest)
 
     ytest[indexnan_test] = np.nan
     return ytest
 
-def ML_regression_crossvalidation(stn_data, stn_predictor, ml_model, probflag, ml_settings={}, dynamic_predictors={}, n_splits=10):
+def ML_regression_crossvalidation(stn_data, stn_predictor, ml_model, probflag, ml_settings={}, dynamic_predictors={}, n_splits=10, master_seed=None):
     t1 = time.time()
 
     if len(dynamic_predictors) == 0:
@@ -652,6 +734,8 @@ def ML_regression_crossvalidation(stn_data, stn_predictor, ml_model, probflag, m
 
     for i, (train_index, test_index) in enumerate(kf.split(stn_predictor)):
         for t in range(ntime):
+            if master_seed is not None:
+                np.random.seed(master_seed + t)
             stn_predictor_t = stn_predictor.copy()
             if dynamic_predictors['flag'] == True:
                 xdata_add = dynamic_predictors['stn_predictor_dynamic'][:, t, :].T
@@ -711,6 +795,10 @@ def train_and_return_test_cv_timestep(t):
     return estimates
 
 def ML_regression_crossvalidation_multiprocessing(stn_data, stn_predictor, ml_model, probflag, ml_settings={}, dynamic_predictors={}, n_splits=10, num_processes=1, master_seed=123456789):
+    if GPU_AVAILABLE:
+        return ML_regression_crossvalidation(stn_data, stn_predictor, ml_model, probflag,
+                                              ml_settings, dynamic_predictors, n_splits, master_seed)
+
     t1 = time.time()
 
     if len(dynamic_predictors) == 0:
@@ -752,7 +840,7 @@ def ML_regression_crossvalidation_multiprocessing(stn_data, stn_predictor, ml_mo
     print('Regression time cost (sec):', t2-t1)
     return np.squeeze(estimates0)
 
-def ML_regression_grid(stn_data, stn_predictor, tar_predictor, ml_model, probflag, ml_settings={}, dynamic_predictors={}):
+def ML_regression_grid(stn_data, stn_predictor, tar_predictor, ml_model, probflag, ml_settings={}, dynamic_predictors={}, master_seed=None):
     t1 = time.time()
 
     if len(dynamic_predictors) == 0:
@@ -766,6 +854,8 @@ def ML_regression_grid(stn_data, stn_predictor, tar_predictor, ml_model, probfla
     tar_predictor_resh = np.reshape(tar_predictor, [nrow*ncol, npred])
 
     for t in range(ntime):
+        if master_seed is not None:
+            np.random.seed(master_seed + t)
         stn_predictor_t = stn_predictor.copy()
         tar_predictor_t = tar_predictor_resh.copy()
 
@@ -820,6 +910,10 @@ def train_and_return_test_grid_timestep(t):
     return ytest
 
 def ML_regression_grid_multiprocessing(stn_data, stn_predictor, tar_predictor, ml_model, probflag, ml_settings={}, dynamic_predictors={}, num_processes=1, master_seed=123456789):
+    if GPU_AVAILABLE:
+        return ML_regression_grid(stn_data, stn_predictor, tar_predictor, ml_model, probflag,
+                                   ml_settings, dynamic_predictors, master_seed)
+
     t1 = time.time()
 
     if len(dynamic_predictors) == 0:
