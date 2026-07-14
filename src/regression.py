@@ -464,12 +464,15 @@ def read_period_input_data(df_mapping, varnames):
         print('Warning! Cannot find any valid dynamic input files')
         ds = xr.Dataset()
     else:
+        print(f"Opening mf dataset, containing {len(files)} files")
         ds = xr.open_mfdataset(files)
         # select ...
         ds = ds[varnames]
         ds = ds.sel(time=slice(tartime[0], tartime[-1]))
         ds = ds.load()
+        print(f"mf dataset loaded to memory")
         ds = ds.interp(time=tartime, method='linear')
+        print(f"dataset interpolation completed for {len(tartime)} timesteps")
     return ds
 
 
@@ -1377,9 +1380,11 @@ def main_regression(config, target):
     if dynamic_flag == True:
 
         allvars = flatten_list(dynamic_predictor_name)
-
+        print("Calling map_filelist_timestep function")
         df_mapping = map_filelist_timestep(dynamic_predictor_filelist, timeaxis)
+        print("Calling read_period_input_data function")
         ds_dynamic = read_period_input_data(df_mapping, allvars)
+        print("Calling rename function")
         ds_dynamic = ds_dynamic.rename({dynamic_grid_lat_name:'lat', dynamic_grid_lon_name:'lon'})
 
         # transformation dynamic variables if necessary
@@ -1398,13 +1403,14 @@ def main_regression(config, target):
                 print('Transform dynamic predictor:', v)
                 ds_dynamic[v].values = data_transformation(ds_dynamic[v].values, dyn_operation_trans[v],
                                                            transform_settings[dyn_operation_trans[v]], 'transform')
-
+        print("Calling regrid_xarray functions")
         ds_dynamic_stn = regrid_xarray(ds_dynamic, ds_stn[stn_lon_name].values, ds_stn[stn_lat_name].values, '1D', method=dyn_operation_interp)
         if target == 'grid':
             # ds_dynamic_tar2 = regrid_xarray(ds_dynamic, xaxis, yaxis, '2D', method=dyn_operation_interp)
             ds_dynamic_tar = regrid_xarray(ds_dynamic, ds_nearinfo[grid_lon_name].values, ds_nearinfo[grid_lat_name].values, '2D',
                                            method=dyn_operation_interp)
 
+        print("Making a copy")
         elif target == 'cval':
             ds_dynamic_tar = ds_dynamic_stn.copy()
 
