@@ -1380,10 +1380,13 @@ def main_regression(config, target):
     if dynamic_flag == True:
 
         allvars = flatten_list(dynamic_predictor_name)
+        print(allvars)
         print("Calling map_filelist_timestep function")
         df_mapping = map_filelist_timestep(dynamic_predictor_filelist, timeaxis)
+        print(df_mapping)
         print("Calling read_period_input_data function")
         ds_dynamic = read_period_input_data(df_mapping, allvars)
+        print(ds_dynamic)
         print("Calling rename function")
         ds_dynamic = ds_dynamic.rename({dynamic_grid_lat_name:'lat', dynamic_grid_lon_name:'lon'})
 
