@@ -650,37 +650,6 @@ def build_model(method, settings, sample_weight_given):
     exec(f"model = sklearn.{method}(**settings)", globals(), ldict)
     return ldict['model'], 'sklearn'
 
-_WGS84_A = 6378137.0        # semi-major axis, meters
-_WGS84_B = 6356752.314245   # semi-minor axis, meters
-
-def latlon_to_cartesian(lat_deg, lon_deg, a=_WGS84_A, b=_WGS84_B):
-    lat = np.radians(lat_deg)
-    lon = np.radians(lon_deg)
-    x = a * np.cos(lat) * np.cos(lon)
-    y = a * np.cos(lat) * np.sin(lon)
-    z = b * np.sin(lat)
-    return np.column_stack([x, y, z])
-
-def build_lake_lookup(ds_lazy, sst_var='sst'):
-    idx = slice(0, None, max(1, ds_lazy.sizes['time'] // 20))
-    sample = ds_lazy[sst_var].isel(time=idx).load()
-    lake_mask = np.any(~np.isnan(sample.values), axis=0)
-
-    lat2d, lon2d = np.meshgrid(ds_lazy.lat.values, ds_lazy.lon.values, indexing='ij')
-    lake_xyz = latlon_to_cartesian(lat2d[lake_mask], lon2d[lake_mask])
-
-    lake_flat_index = np.flatnonzero(lake_mask.ravel())
-    tree = KDTree(lake_xyz)
-    return tree, lake_flat_index, lake_mask.shape
-
-def nearest_lake_value_and_distance(tree, lake_flat_index, grid_shape, block_values, query_lat, query_lon):
-    query_xyz = latlon_to_cartesian(query_lat, query_lon)
-    dist_m, tree_idx = tree.query(query_xyz)
-    flat_idx = lake_flat_index[tree_idx]
-    lat_idx, lon_idx = np.unravel_index(flat_idx, grid_shape)
-    values = block_values[:, lat_idx, lon_idx]
-    return values, dist_m
-
 def train_and_return_test(Xtrain, ytrain, Xtest, method, probflag, settings = {}, weight=[]):
     indexvalid = ~np.isnan( np.sum(Xtrain, axis=1) + ytrain)
 
@@ -1436,17 +1405,7 @@ def main_regression(config, target):
 
         stn_chunks, tar_chunks = [], []
         ntime = ds_lazy.sizes['time']
-        chunk_size = 500  # tune for system RAM
-
-        tree, lake_flat_index, grid_shape = build_lake_lookup(ds_lazy, sst_var='sst')
-
-        stn_lat = ds_stn[stn_lat_name].values
-        stn_lon = ds_stn[stn_lon_name].values
-        if target == 'grid':
-            tar_lat2d = ds_nearinfo[grid_lat_name].values
-            tar_lon2d = ds_nearinfo[grid_lon_name].values
-            tar_lat, tar_lon = tar_lat2d.ravel(), tar_lon2d.ravel()
-            tar_shape = tar_lat2d.shape
+        chunk_size = 500  # ~838*1181*500*4 bytes ≈ 1.9 GB per chunk; tune to your RAM
 
         for start in range(0, ntime, chunk_size):
             block = ds_lazy.isel(time=slice(start, start + chunk_size)).load()  # bounded size
@@ -1457,21 +1416,11 @@ def main_regression(config, target):
                         block[v].values, dyn_operation_trans[v],
                         transform_settings[dyn_operation_trans[v]], 'transform')
 
-            sst_stn, dist_stn = nearest_lake_value_and_distance(
-                tree, lake_flat_index, grid_shape, block['sst'].values, stn_lat, stn_lon)
-            stn_chunks.append(xr.Dataset(
-                {'sst': (('time', 'z'), sst_stn),
-                'sst_dist': (('time', 'z'), np.tile(dist_stn, (sst_stn.shape[0], 1)))},
-                coords={'time': block.time.values}))
+            stn_chunks.append(regrid_xarray(block, ds_stn[stn_lon_name].values, ds_stn[stn_lat_name].values,
+                                            '1D', method=dyn_operation_interp))
             if target == 'grid':
-                sst_tar, dist_tar = nearest_lake_value_and_distance(
-                    tree, lake_flat_index, grid_shape, block['sst'].values, tar_lat, tar_lon)
-                sst_tar = sst_tar.reshape(-1, *tar_shape)
-                dist_tar = np.broadcast_to(dist_tar.reshape(tar_shape), sst_tar.shape)
-                tar_chunks.append(xr.Dataset(
-                    {'sst': (('time', 'row', 'col'), sst_tar),
-                    'sst_dist': (('time', 'row', 'col'), dist_tar)},
-                    coords={'time': block.time.values}))
+                tar_chunks.append(regrid_xarray(block, ds_nearinfo[grid_lon_name].values, ds_nearinfo[grid_lat_name].values,
+                                                '2D', method=dyn_operation_interp))
             del block
 
         ds_dynamic_stn = xr.concat(stn_chunks, dim='time').interp(time=tartime, method='linear')
