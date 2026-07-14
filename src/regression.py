@@ -23,12 +23,12 @@ _CUML_NO_SAMPLE_WEIGHT = {'ensemble.RandomForestRegressor', 'ensemble.RandomFore
 try:
     import cupy as cp
     if cp.cuda.runtime.getDeviceCount() > 0:
-        import cuml
         from cuml.linear_model import LinearRegression as _cuLinearRegression
         from cuml.linear_model import LogisticRegression as _cuLogisticRegression
         from cuml.ensemble import RandomForestRegressor as _cuRandomForestRegressor
         from cuml.ensemble import RandomForestClassifier as _cuRandomForestClassifier
-        cuml.logger.set_level(cuml.logger.level_trace)
+        from cuml.internals import logger
+        logger.set_level(logger.level_enum.debug)
         _CUML_MODEL_MAP = {
             'linear_model.LinearRegression': _cuLinearRegression,
             'linear_model.LogisticRegression': _cuLogisticRegression,
