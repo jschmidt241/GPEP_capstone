@@ -1378,41 +1378,51 @@ def main_regression(config, target):
     # this costs more memory than reading for each time step, but reduces interpolation time. this could be a challenge for large domain
 
     if dynamic_flag == True:
-
         allvars = flatten_list(dynamic_predictor_name)
-        print(allvars)
-        print("Calling map_filelist_timestep function")
         df_mapping = map_filelist_timestep(dynamic_predictor_filelist, timeaxis)
-        print(df_mapping)
-        print("Calling read_period_input_data function")
-        ds_dynamic = read_period_input_data(df_mapping, allvars)
-        print(ds_dynamic)
-        print("Calling rename function")
-        ds_dynamic = ds_dynamic.rename({dynamic_grid_lat_name:'lat', dynamic_grid_lon_name:'lon'})
+        tartime = df_mapping['tartime'].values
 
-        # transformation dynamic variables if necessary
-        dyn_operation_trans = {}
-        dyn_operation_interp = {}
+        files = np.unique(df_mapping['file'].values)
+        files = [f for f in files if len(f) > 0]
+
+        # parse transform/interp settings up front (unchanged from original)
+        dyn_operation_trans, dyn_operation_interp = {}, {}
         for op in dynamic_predictor_operation:
             info = op.split(':')
             for i in range(1, len(info)):
-                if info[i].split('=')[0] == 'transform':
-                    dyn_operation_trans[info[0]] = info[i].split('=')[1]
-                elif info[i].split('=')[0] == 'interp':
-                    dyn_operation_interp[info[0]] = info[i].split('=')[1]
+                key, val = info[i].split('=')[0], info[i].split('=')[1]
+                if key == 'transform':
+                    dyn_operation_trans[info[0]] = val
+                elif key == 'interp':
+                    dyn_operation_interp[info[0]] = val
 
-        for v in ds_dynamic.data_vars:
-            if v in dyn_operation_trans:
-                print('Transform dynamic predictor:', v)
-                ds_dynamic[v].values = data_transformation(ds_dynamic[v].values, dyn_operation_trans[v],
-                                                           transform_settings[dyn_operation_trans[v]], 'transform')
-        print("Calling regrid_xarray functions")
-        ds_dynamic_stn = regrid_xarray(ds_dynamic, ds_stn[stn_lon_name].values, ds_stn[stn_lat_name].values, '1D', method=dyn_operation_interp)
+        ds_lazy = xr.open_mfdataset(files, chunks={'time': 500})[allvars]
+        ds_lazy = ds_lazy.rename({dynamic_grid_lat_name: 'lat', dynamic_grid_lon_name: 'lon'})
+        ds_lazy = ds_lazy.sel(time=slice(tartime[0], tartime[-1]))
+
+        stn_chunks, tar_chunks = [], []
+        ntime = ds_lazy.sizes['time']
+        chunk_size = 500  # ~838*1181*500*4 bytes ≈ 1.9 GB per chunk; tune to your RAM
+
+        for start in range(0, ntime, chunk_size):
+            block = ds_lazy.isel(time=slice(start, start + chunk_size)).load()  # bounded size
+
+            for v in block.data_vars:
+                if v in dyn_operation_trans:
+                    block[v].values = data_transformation(
+                        block[v].values, dyn_operation_trans[v],
+                        transform_settings[dyn_operation_trans[v]], 'transform')
+
+            stn_chunks.append(regrid_xarray(block, ds_stn[stn_lon_name].values, ds_stn[stn_lat_name].values,
+                                            '1D', method=dyn_operation_interp))
+            if target == 'grid':
+                tar_chunks.append(regrid_xarray(block, ds_nearinfo[grid_lon_name].values, ds_nearinfo[grid_lat_name].values,
+                                                '2D', method=dyn_operation_interp))
+            del block
+
+        ds_dynamic_stn = xr.concat(stn_chunks, dim='time').interp(time=tartime, method='linear')
         if target == 'grid':
-            # ds_dynamic_tar2 = regrid_xarray(ds_dynamic, xaxis, yaxis, '2D', method=dyn_operation_interp)
-            ds_dynamic_tar = regrid_xarray(ds_dynamic, ds_nearinfo[grid_lon_name].values, ds_nearinfo[grid_lat_name].values, '2D',
-                                           method=dyn_operation_interp)
-            print("Making a copy")
+            ds_dynamic_tar = xr.concat(tar_chunks, dim='time').interp(time=tartime, method='linear')
         elif target == 'cval':
             ds_dynamic_tar = ds_dynamic_stn.copy()
 
