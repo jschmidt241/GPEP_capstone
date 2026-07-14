@@ -1412,8 +1412,7 @@ def main_regression(config, target):
             # ds_dynamic_tar2 = regrid_xarray(ds_dynamic, xaxis, yaxis, '2D', method=dyn_operation_interp)
             ds_dynamic_tar = regrid_xarray(ds_dynamic, ds_nearinfo[grid_lon_name].values, ds_nearinfo[grid_lat_name].values, '2D',
                                            method=dyn_operation_interp)
-
-        print("Making a copy")
+            print("Making a copy")
         elif target == 'cval':
             ds_dynamic_tar = ds_dynamic_stn.copy()
 
